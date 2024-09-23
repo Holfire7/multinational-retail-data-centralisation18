@@ -144,37 +144,27 @@ class DataExtractor:
                 return None
         return None
         
-    def extract_from_s3(self, s3_url: str) -> pd.DataFrame:
-        """Extracts data from an S3 URL and returns a pandas DataFrame."""
-        bucket_name, object_key = self._parse_s3_url(s3_url)
+    def extract_from_s3(self, s3_address):
+        # Parse the S3 bucket and key from the provided S3 address
+        s3_bucket, s3_key = self._parse_s3_address(s3_address)
         
-        # Retrieve the object from S3
-        response = self.s3_client.get_object(Bucket=bucket_name, Key=object_key)
+        # Download the object from S3
+        obj = self.s3_client.get_object(Bucket=s3_bucket, Key=s3_key)
         
-        # Read the content of the object
-        data = response['Body'].read().decode('utf-8')
+        # Read the CSV data
+        data = obj['Body'].read().decode('utf-8')
         
-        # Determine the file type based on the object key
-        if object_key.endswith('.csv'):
-            df = pd.read_csv(StringIO(data))
-        elif object_key.endswith('.json'):
-            df = pd.read_json(StringIO(data))
-        else:
-            raise ValueError(f"Unsupported file type: {object_key}")
+        # Convert the CSV data into a pandas DataFrame
+        df = pd.read_csv(StringIO(data))
         
         return df
+    
+    def _parse_s3_address(self, s3_address):
+        # Remove the 's3://' prefix and split the address into bucket and key
+        s3_path = s3_address.replace("s3://", "")
+        s3_bucket, s3_key = s3_path.split("/", 1)
+        return s3_bucket, s3_key
 
-    def _parse_s3_url(self, s3_url: str) -> tuple:
-        """Parses an S3 URL into bucket name and object key."""
-        s3_url = s3_url.replace('s3://', '')
-        parts = s3_url.split('/', 1)
-        if len(parts) != 2:
-            raise ValueError("Invalid S3 URL format")
-        
-        bucket_name = parts[0]
-        object_key = parts[1]
-        
-        return bucket_name, object_key
     def extract_json_data(self, json_url):
         # Download the JSON file from the provided S3 link
         response = requests.get(json_url)
@@ -258,57 +248,74 @@ class DataCleaning:
         address = address.strip()
         return address
 
-    def convert_product_weights(self, products_df: pd.DataFrame) -> pd.DataFrame:
-        """Converts product weights to kilograms and cleans up the weight column."""
-        def convert_weight(weight):
-            weight = str(weight).strip().lower()
-            if not weight:
-                return None
-            number = re.findall(r"[\d.]+", weight)
-            if not number:
-                return None
-            number = float(number[0])
-            if 'kg' in weight:
-                return number
-            if 'g' in weight or 'ml' in weight:
-                return number / 1000
-            if 'lb' in weight:
-                return number * 0.453592
-            if 'oz' in weight:
-                return number * 0.0283495
-            return None
-
-        # Convert and clean the weight column
-        if 'weight' in products_df.columns:
-            products_df['weight'] = products_df['weight'].apply(convert_weight)
-            products_df = products_df.dropna(subset=['weight'])  # Remove rows with invalid weights
+    def convert_product_weights(self, df):
+        # Define conversion factors
+        g_to_kg = 0.001
+        lb_to_kg = 0.453592
+        oz_to_kg = 0.0283495
+        ml_to_g = 1  # 1:1 ratio for ml to g, as rough estimate
         
-        return products_df
+        def convert_weight(value):
+            value = str(value).lower()  # Convert to lowercase for uniformity
+            
+            # Remove any excess characters
+            value = re.sub(r'[^\d\.mlkg]', '', value)
+            
+            if 'kg' in value:
+                # Direct conversion to float
+                return float(re.sub(r'[^\d\.]', '', value))
+            
+            elif 'g' in value:
+                # Convert grams to kilograms
+                return float(re.sub(r'[^\d\.]', '', value)) * g_to_kg
+            
+            elif 'lb' in value:
+                # Convert pounds to kilograms
+                return float(re.sub(r'[^\d\.]', '', value)) * lb_to_kg
+            
+            elif 'oz' in value:
+                # Convert ounces to kilograms
+                return float(re.sub(r'[^\d\.]', '', value)) * oz_to_kg
+            
+            elif 'ml' in value:
+                # Treat milliliters as grams and convert to kilograms
+                return float(re.sub(r'[^\d\.]', '', value)) * ml_to_g * g_to_kg
+            
+            else:
+                # If no unit specified, return NaN or 0 as a default value
+                return float(value) if value.isnumeric() else None
+        
+        # Apply the conversion to the 'weight' column
+        df['weight'] = df['weight'].apply(convert_weight)
+        
+        return df
     
-    def clean_products_data(self, products_df: pd.DataFrame) -> pd.DataFrame:
-        """Cleans the product data by handling missing values and erroneous entries."""
+    def clean_products_data(self, df):
+        # Step 1: Convert product weights to kilograms
+        df = self.convert_product_weights(df)
 
-        products_df = products_df.copy()
-        
-        # Handle missing values
-        products_df.fillna({
-            'product_name': 'Unknown',
-            'weight': 0
-        }, inplace=True)
-        
-        
-        # Handle erroneous weight entries
-        if 'weight' in products_df.columns:
-            products_df['weight'] = pd.to_numeric(products_df['weight'], errors='coerce')
-            products_df = products_df[products_df['weight'] >= 0]  # Remove rows with negative weights
-        
-        #Deduplicate data if necessary
-        products_df.drop_duplicates(inplace=True)
-        
-        # Reset the index after cleaning
-        products_df.reset_index(drop=True, inplace=True)
-        
-        return products_df
+        # Step 2: Convert the 'weight' column to numeric, forcing invalid values to NaN
+        df['weight'] = pd.to_numeric(df['weight'], errors='coerce')
+
+        # Step 3: Drop rows with missing or invalid weight values (NaN)
+        df = df.dropna(subset=['weight'])
+
+        # Step 4: Remove any rows with negative or zero weights (assuming these are erroneous)
+        df = df[df['weight'] > 0]
+
+        # Step 5: Remove duplicate rows (if applicable)
+        df = df.drop_duplicates()
+
+        # Step 6: Trim whitespace from all string columns (if any)
+        df = df.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+
+        # Step 7: Handle any additional domain-specific cleaning logic (e.g., correcting known issues)
+        df = df.dropna(subset=['product_name'])
+
+        # Step 8: Reset the index after cleaning
+        df = df.reset_index(drop=True)
+
+        return df
     
     def clean_orders_data(self, df: pd.DataFrame) -> pd.DataFrame:
         """Cleans the orders data by removing unnecessary columns."""
@@ -391,13 +398,13 @@ if __name__ == "__main__":
 
     # Process user data
     user_data = data_extractor.read_rds_table(rds_connector, "legacy_store_details")
-    user_data1 = data_extractor.read_rds_table(rds_connector, 'dim_card_details')
+    #user_data1 = data_extractor.read_rds_table(rds_connector, 'dim_card_details')
     user_data2 = data_extractor.read_rds_table(rds_connector, 'legacy_users',)
-    user_data3 = data_extractor.read_rds_table(rds_connector, 'orders_table',)
+    #user_data3 = data_extractor.read_rds_table(rds_connector, 'orders_table',)
     cleaned_user_data = data_cleaner.clean_data(user_data)  # Pass the user data to clean_data
-    cleaned_user_data = data_cleaner.clean_data(user_data1)
-    cleaned_user_data = data_cleaner.clean_data(user_data2)
-    cleaned_user_data = data_cleaner.clean_data(user_data3)
+    #cleaned_user_data = data_cleaner.clean_data(user_data1)
+    cleaned_user_data2 = data_cleaner.clean_data(user_data2)
+    #cleaned_user_data = data_cleaner.clean_data(user_data3)
 
     # Process card data
     pdf_url = 'https://data-handling-public.s3.eu-west-1.amazonaws.com/card_details.pdf'
@@ -430,6 +437,7 @@ if __name__ == "__main__":
     # Upload cleaned data to the database
     local_connector = LocalPostgresConnector('local_db_creds.yaml')
     local_connector.upload_dataframe(cleaned_user_data, 'dim_users')
+    local_connector.upload_dataframe(cleaned_user_data2, 'dim_users')
     local_connector.upload_dataframe(cleaned_card_data, 'dim_card_details')
     local_connector.upload_dataframe(cleaned_stores_data, 'dim_store_details')
     local_connector.upload_dataframe(cleaned_products_data, 'dim_products')
