@@ -23,4 +23,4 @@ with engine.connect() as con:
             UPDATE dim_products
             SET product_price = REPLACE(product_price, '£', '')
         '''))
-
+    print("Symbol is now removed")

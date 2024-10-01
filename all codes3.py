@@ -234,10 +234,15 @@ class DataCleaning:
             df['opening_date'] = pd.to_datetime(df['opening_date'], errors='coerce')
             df['opening_date'] = df['opening_date'].fillna(pd.Timestamp('1900-01-01'))  # Default invalid dates
 
-        # 2. Deduplicate data if necessary
+        # 2. Keep only rows with valid 'country_code' values
+        valid_country_codes = ['GB', 'US', 'DE']
+        if 'country_code' in df.columns:
+            df = df[df['country_code'].isin(valid_country_codes)]
+        
+        # 3. Deduplicate data if necessary
         df.drop_duplicates(inplace=True)
 
-        # 3. Reset the index after cleaning
+        # 4. Reset the index after cleaning
         df.reset_index(drop=True, inplace=True)
 
         return df
@@ -303,16 +308,23 @@ class DataCleaning:
         # Step 4: Remove any rows with negative or zero weights (assuming these are erroneous)
         df = df[df['weight'] > 0]
 
-        # Step 5: Remove duplicate rows (if applicable)
+         # Step 5: Clean 'product_price' by removing '£' and converting to numeric
+        df['product_price'] = df['product_price'].str.replace("£", "").str.strip()  # Remove '£' and trim spaces
+        df['product_price'] = pd.to_numeric(df['product_price'], errors='coerce')  # Convert to numeric, invalid values to NaN
+
+        # Step 6: Drop rows with missing or invalid price values (NaN)
+        df = df.dropna(subset=['product_price'])
+
+        # Step 7: Remove duplicate rows (if applicable)
         df = df.drop_duplicates()
 
-        # Step 6: Trim whitespace from all string columns (if any)
-        df = df.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+        # Step 8: Trim whitespace from all string columns (if any)
+        df = df.apply(lambda col: col.str.strip().replace("£", " ") if col.dtype == "object" else col)
 
-        # Step 7: Handle any additional domain-specific cleaning logic (e.g., correcting known issues)
+        # Step 9: Handle any additional domain-specific cleaning logic (e.g., correcting known issues)
         df = df.dropna(subset=['product_name'])
 
-        # Step 8: Reset the index after cleaning
+        # Step 10: Reset the index after cleaning
         df = df.reset_index(drop=True)
 
         return df
