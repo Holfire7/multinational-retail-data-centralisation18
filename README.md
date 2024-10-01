@@ -36,6 +36,8 @@ The files are arranged alphabetically on the the folder named miltinational reta
 
 LICENSE:
 
+This project is licensed under the MIT License. See the LICENSE file for details.
+
 
 
 
